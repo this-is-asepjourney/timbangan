@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Program Timbangan Digital dengan ADS1232
-Raspberry Pi 4 + ADS1232 + Load Cell
-"""
+
 
 import time
 import sys
@@ -10,8 +7,15 @@ import platform
 import random
 import json
 import os
+import threading
+import tkinter as tk
+from tkinter import font as tkfont
 from datetime import datetime
 from datetime import timezone
+
+# Force UTF-8 encoding for stdout on Windows to support emojis
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 # Deteksi platform
 IS_RASPBERRY_PI = platform.system() == 'Linux' and 'arm' in platform.machine().lower()
@@ -588,6 +592,31 @@ class TimbanganApp:
         self.last_save_time = None
         self.save_count = 0
         self.read_count = 0
+        self.current_weight = 0.0
+        self.is_stable = False
+    
+    def process_reading(self):
+        """Process one reading cycle (read, stabilize, save)"""
+        self.read_count += 1
+        weight = self.ads.read_weight()
+        
+        if weight is not None:
+            self.current_weight = weight
+            # Cek apakah berat stabil
+            self.is_stable = self.stabilizer.add_reading(weight)
+            
+            # Simpan HANYA jika berat stabil dan berbeda dari sebelumnya
+            if self.is_stable:
+                stable_weight = self.stabilizer.get_stable_weight()
+                if stable_weight is not None:
+                    now = datetime.now()
+                    timestamp_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                    
+                    # Simpan ke file
+                    if self.save_to_file(stable_weight, timestamp_ms):
+                        self.last_saved_weight = stable_weight
+                        return stable_weight, timestamp_ms
+        return None, None
     
     def save_to_file(self, weight, timestamp):
         """Simpan data ke file (replace, tidak append) dengan timestamp real-time"""
@@ -658,37 +687,23 @@ class TimbanganApp:
         
         try:
             while self.running:
-                self.read_count += 1
-                weight = self.ads.read_weight()
+                saved_weight, save_time = self.process_reading()
                 
                 # #region agent log
                 if self.read_count % 10 == 0:
                     try:
-                        f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:680','message':'Weight read (every 10th)','data':{'weight':weight,'read_count':self.read_count,'save_count':self.save_count},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
+                        f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:680','message':'Weight read (every 10th)','data':{'weight':self.current_weight,'read_count':self.read_count,'save_count':self.save_count},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
                     except: pass
                 # #endregion
                 
-                if weight is not None:
-                    # Cek apakah berat stabil
-                    is_stable = self.stabilizer.add_reading(weight)
-                    
-                    # Tampilkan di console
-                    self.display_weight(weight, is_stable)
-                    
-                    # Simpan HANYA jika berat stabil dan berbeda dari sebelumnya
-                    if is_stable:
-                        stable_weight = self.stabilizer.get_stable_weight()
-                        if stable_weight is not None:
-                            now = datetime.now()
-                            timestamp_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                            
-                            # Simpan ke file
-                            if self.save_to_file(stable_weight, timestamp_ms):
-                                self.last_saved_weight = stable_weight
-                                # Tampilkan notifikasi singkat
-                                print(f"\n💾 Tersimpan: {stable_weight:.3f} kg pada {timestamp_ms}")
-                                print(f"   Total pembacaan: {self.read_count}, Total simpan: {self.save_count}")
-                                print()
+                # Tampilkan di console
+                self.display_weight(self.current_weight, self.is_stable)
+                
+                if saved_weight is not None:
+                     # Tampilkan notifikasi singkat
+                    print(f"\n💾 Tersimpan: {saved_weight:.3f} kg pada {save_time}")
+                    print(f"   Total pembacaan: {self.read_count}, Total simpan: {self.save_count}")
+                    print()
                 
                 time.sleep(0.1)  # Update setiap 100ms
         
@@ -711,6 +726,112 @@ class TimbanganApp:
             
             self.ads.cleanup()
             print("Program selesai")
+
+
+class TimbanganGUI:
+    def __init__(self, app):
+        self.app = app
+        self.root = tk.Tk()
+        self.root.title("Aplikasi Timbangan Digital")
+        self.root.geometry("600x400")
+        self.root.configure(bg="#f0f0f0")
+        
+        # Handle close event
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # UI Components
+        self.create_widgets()
+        
+        # Start reading thread
+        self.app.running = True
+        self.read_thread = threading.Thread(target=self.read_loop, daemon=True)
+        self.read_thread.start()
+        
+        # Start UI update loop
+        self.update_ui()
+    
+    def create_widgets(self):
+        # Container utama
+        main_frame = tk.Frame(self.root, bg="#f0f0f0")
+        main_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        # Judul
+        title_label = tk.Label(main_frame, text="DIGITAL SCALE", font=("Helvetica", 24, "bold"), bg="#f0f0f0", fg="#333")
+        title_label.pack(pady=(0, 20))
+        
+        # Display Berat
+        self.weight_var = tk.StringVar(value="0.000 kg")
+        self.weight_label = tk.Label(main_frame, textvariable=self.weight_var, font=("Courier New", 60, "bold"), bg="white", fg="black", relief="sunken", bd=5, width=10)
+        self.weight_label.pack(pady=20)
+        
+        # Status Label
+        self.status_var = tk.StringVar(value="Menunggu...")
+        self.status_label = tk.Label(main_frame, textvariable=self.status_var, font=("Helvetica", 14), bg="#f0f0f0", fg="gray")
+        self.status_label.pack(pady=10)
+        
+        # Info Save
+        self.save_info_var = tk.StringVar(value="Belum ada data tersimpan")
+        save_label = tk.Label(main_frame, textvariable=self.save_info_var, font=("Helvetica", 10), bg="#f0f0f0", fg="#666")
+        save_label.pack(pady=5)
+        
+        # Buttons Frame
+        btn_frame = tk.Frame(main_frame, bg="#f0f0f0")
+        btn_frame.pack(pady=20, fill="x")
+        
+        # Tare Button
+        tare_btn = tk.Button(btn_frame, text="TARE / ZERO", font=("Helvetica", 12, "bold"), bg="#d9534f", fg="white", height=2, command=self.do_tare)
+        tare_btn.pack(side="left", expand=True, fill="x", padx=5)
+        
+        # Exit Button
+        exit_btn = tk.Button(btn_frame, text="KELUAR", font=("Helvetica", 12, "bold"), bg="#5bc0de", fg="white", height=2, command=self.on_closing)
+        exit_btn.pack(side="right", expand=True, fill="x", padx=5)
+    
+    def do_tare(self):
+        # Jalankan tare di thread terpisah agar UI tidak freeze
+        threading.Thread(target=self._tare_thread, daemon=True).start()
+        
+    def _tare_thread(self):
+        self.status_var.set("Melakukan Tare...")
+        self.app.ads.tare()
+        self.app.ads.save_calibration()
+    
+    def read_loop(self):
+        """Thread untuk membaca sensor data terus menerus"""
+        while self.app.running:
+            saved_weight, save_time = self.app.process_reading()
+            if saved_weight is not None:
+                self.save_info_var.set(f"Tersimpan: {saved_weight:.3f} kg @ {save_time.split()[1]}")
+            time.sleep(0.05)  # Sedikit lebih cepat dari CLI
+            
+    def update_ui(self):
+        """Update UI dari main thread"""
+        if not self.app.running:
+            return
+            
+        weight = self.app.current_weight
+        is_stable = self.app.is_stable
+        
+        # Update text berat
+        self.weight_var.set(f"{weight:.3f} kg")
+        
+        # Update status indikator
+        if is_stable:
+            self.status_var.set("STABIL")
+            self.status_label.config(fg="green")
+            self.weight_label.config(fg="green")
+        else:
+            self.status_var.set("Tidak Stabil")
+            self.status_label.config(fg="#ffc107") # Amber/Orange
+            self.weight_label.config(fg="black")
+            
+        # Schedule next update (50ms)
+        self.root.after(50, self.update_ui)
+        
+    def on_closing(self):
+        self.app.running = False
+        self.root.destroy()
+        self.app.ads.cleanup()
+        sys.exit(0)
 
 
 def main():
@@ -762,7 +883,14 @@ def main():
             print()
         
         app = TimbanganApp()
-        app.run()
+        
+        # Cek argument --gui
+        if "--gui" in sys.argv:
+            print("Memulai mode GUI...")
+            gui = TimbanganGUI(app)
+            gui.root.mainloop()
+        else:
+            app.run()
     except Exception as e:
         print(f"Error: {e}")
         if IS_RASPBERRY_PI:
