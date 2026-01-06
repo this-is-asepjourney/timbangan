@@ -126,8 +126,10 @@ SCALE_FACTOR = 0.0000015  # Faktor skala untuk konversi ke kg
 OFFSET = 0.0  # Offset untuk zero adjustment
 
 # File untuk menyimpan data
-DATA_FILE = "data_timbangan.txt"
-CALIBRATION_FILE = "kalibrasi.json"  # File untuk menyimpan/memuat kalibrasi
+# Path untuk penyimpanan data di Raspberry Pi
+DATA_DIR = "/home/project/datatimbangan"
+DATA_FILE = os.path.join(DATA_DIR, "data_timbangan.txt")
+CALIBRATION_FILE = os.path.join(DATA_DIR, "kalibrasi.json")  # File untuk menyimpan/memuat kalibrasi
 
 
 def verify_system_time():
@@ -154,6 +156,32 @@ def verify_system_time():
     except Exception as e:
         print(f"WARNING: Error memverifikasi waktu sistem: {e}")
         return False, {}
+
+
+def ensure_data_directory():
+    """
+    Pastikan directory untuk penyimpanan data ada dan memiliki permission yang benar
+    """
+    try:
+        if not os.path.exists(DATA_DIR):
+            os.makedirs(DATA_DIR, mode=0o755, exist_ok=True)
+            print(f"OK: Directory {DATA_DIR} dibuat")
+        
+        # Pastikan directory bisa ditulis
+        if not os.access(DATA_DIR, os.W_OK):
+            print(f"WARNING: Directory {DATA_DIR} tidak bisa ditulis")
+            print(f"   Jalankan: sudo chmod 755 {DATA_DIR}")
+            print(f"   Atau: sudo chown $USER:$USER {DATA_DIR}")
+            return False
+        return True
+    except PermissionError as e:
+        print(f"ERROR: Permission denied saat membuat directory {DATA_DIR}")
+        print(f"   Jalankan: sudo mkdir -p {DATA_DIR}")
+        print(f"   Lalu: sudo chown $USER:$USER {DATA_DIR}")
+        return False
+    except Exception as e:
+        print(f"ERROR: Gagal membuat directory {DATA_DIR}: {e}")
+        return False
 
 
 def load_calibration():
@@ -460,6 +488,12 @@ class TimbanganApp:
     def save_to_file(self, weight, timestamp):
         """Simpan data ke file (replace, tidak append) dengan timestamp real-time"""
         try:
+            # Pastikan directory ada
+            if not ensure_data_directory():
+                print("WARNING: Gagal menyimpan data - directory tidak bisa diakses")
+                return
+            
+            # Tulis data ke file
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
                 f.write(f"Waktu: {timestamp}\n")
                 f.write(f"Tanggal: {timestamp.split()[0]}\n")  # Tanggal saja
@@ -467,6 +501,10 @@ class TimbanganApp:
                 f.write(f"Berat: {weight:.3f} kg\n")
                 # Tambahkan timestamp dalam format ISO untuk kompatibilitas
                 f.write(f"Timestamp: {timestamp}\n")
+        except PermissionError as e:
+            print(f"\nERROR: Permission denied saat menyimpan data ke {DATA_FILE}")
+            print(f"   Jalankan: sudo chown $USER:$USER {DATA_DIR}")
+            print(f"   Atau: sudo chmod 755 {DATA_DIR}")
         except Exception as e:
             print(f"Error menyimpan data: {e}")
     
@@ -515,6 +553,16 @@ class TimbanganApp:
 def main():
     """Fungsi utama"""
     try:
+        # Pastikan directory data ada dan bisa diakses
+        if IS_RASPBERRY_PI:
+            print("Memverifikasi directory penyimpanan data...")
+            if not ensure_data_directory():
+                print("WARNING: Directory data tidak bisa diakses, program tetap berjalan")
+                print(f"   File akan dicoba disimpan di: {DATA_FILE}")
+            else:
+                print(f"OK: Directory data siap: {DATA_DIR}")
+            print()
+        
         # Verifikasi waktu sistem
         print("Memverifikasi waktu sistem...")
         is_time_valid, time_info = verify_system_time()
