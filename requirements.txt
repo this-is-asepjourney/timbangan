@@ -1,0 +1,10 @@
+# Dependencies untuk Raspberry Pi
+# Install hanya jika menjalankan di Raspberry Pi
+# Di Windows, program akan menggunakan mock libraries
+
+# Untuk Raspberry Pi, install dengan:
+# pip install RPi.GPIO>=0.7.1 spidev>=3.5
+
+RPi.GPIO>=0.7.1; sys_platform == 'linux' and platform_machine == 'armv7l'
+spidev>=3.5; sys_platform == 'linux' and platform_machine == 'armv7l'
+
