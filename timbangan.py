@@ -131,6 +131,20 @@ DATA_DIR = "/home/project/datatimbangan"
 DATA_FILE = os.path.join(DATA_DIR, "data_timbangan.txt")
 CALIBRATION_FILE = os.path.join(DATA_DIR, "kalibrasi.json")  # File untuk menyimpan/memuat kalibrasi
 
+# Debug log path
+DEBUG_LOG_DIR = os.path.join(os.path.dirname(__file__), ".cursor")
+DEBUG_LOG_FILE = os.path.join(DEBUG_LOG_DIR, "debug.log")
+
+def ensure_debug_log_directory():
+    """Pastikan directory untuk debug log ada"""
+    try:
+        if not os.path.exists(DEBUG_LOG_DIR):
+            os.makedirs(DEBUG_LOG_DIR, exist_ok=True)
+        return True
+    except Exception as e:
+        print(f"Warning: Cannot create debug log directory: {e}")
+        return False
+
 
 def verify_system_time():
     """
@@ -182,7 +196,6 @@ def ensure_data_directory():
     except Exception as e:
         print(f"ERROR: Gagal membuat directory {DATA_DIR}: {e}")
         return False
-
 
 def load_calibration():
     """
@@ -478,74 +491,224 @@ class ADS1232:
         GPIO.cleanup()
 
 
+class WeightStabilizer:
+    """Kelas untuk mendeteksi stabilitas berat"""
+    
+    def __init__(self, threshold_kg=0.005, stable_count=5):
+        """
+        threshold_kg: perbedaan maksimal (kg) untuk dianggap stabil
+        stable_count: jumlah pembacaan berturut-turut yang harus stabil
+        """
+        self.threshold_kg = threshold_kg
+        self.stable_count = stable_count
+        self.weight_buffer = []
+        self.last_stable_weight = None
+        self.stable_counter = 0
+    
+    def add_reading(self, weight):
+        """Tambahkan pembacaan berat baru"""
+        # #region agent log
+        try:
+            ensure_debug_log_directory()
+            import json;f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:515','message':'WeightStabilizer add_reading','data':{'weight':weight,'buffer_len':len(self.weight_buffer),'stable_counter':self.stable_counter},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H2'})+'\n');f.close()
+        except: pass
+        # #endregion
+        
+        if weight is None:
+            return False
+        
+        # Tambahkan ke buffer
+        self.weight_buffer.append(weight)
+        
+        # Batasi buffer size
+        if len(self.weight_buffer) > self.stable_count:
+            self.weight_buffer.pop(0)
+        
+        # Cek apakah sudah cukup data
+        if len(self.weight_buffer) < self.stable_count:
+            return False
+        
+        # Cek stabilitas: hitung standar deviasi
+        avg_weight = sum(self.weight_buffer) / len(self.weight_buffer)
+        max_diff = max(abs(w - avg_weight) for w in self.weight_buffer)
+        
+        # #region agent log
+        try:
+            f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:540','message':'Stability check','data':{'avg_weight':avg_weight,'max_diff':max_diff,'threshold':self.threshold_kg,'is_stable':max_diff <= self.threshold_kg},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H3'})+'\n');f.close()
+        except: pass
+        # #endregion
+        
+        # Jika stabil
+        if max_diff <= self.threshold_kg:
+            # Cek apakah berbeda dari nilai stabil terakhir
+            if self.last_stable_weight is None or abs(avg_weight - self.last_stable_weight) > self.threshold_kg:
+                self.last_stable_weight = avg_weight
+                self.stable_counter = 0
+                
+                # #region agent log
+                try:
+                    f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:554','message':'New stable weight detected','data':{'stable_weight':avg_weight},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H2'})+'\n');f.close()
+                except: pass
+                # #endregion
+                
+                return True
+        else:
+            # Reset jika tidak stabil
+            self.stable_counter = 0
+        
+        return False
+    
+    def get_stable_weight(self):
+        """Ambil berat stabil terakhir"""
+        if self.last_stable_weight is not None and len(self.weight_buffer) >= self.stable_count:
+            return sum(self.weight_buffer) / len(self.weight_buffer)
+        return None
+    
+    def reset(self):
+        """Reset state"""
+        self.weight_buffer.clear()
+        self.stable_counter = 0
+
+
 class TimbanganApp:
-    """Aplikasi utama timbangan"""
+    """Aplikasi utama timbangan dengan deteksi stabilitas"""
     
     def __init__(self):
+        # #region agent log
+        try:
+            ensure_debug_log_directory()
+            import json;f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:582','message':'TimbanganApp initialized','data':{},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
+        except: pass
+        # #endregion
+        
         self.ads = ADS1232()
         self.running = True
+        self.stabilizer = WeightStabilizer(threshold_kg=0.005, stable_count=5)
+        self.last_saved_weight = None
+        self.last_save_time = None
+        self.save_count = 0
+        self.read_count = 0
     
     def save_to_file(self, weight, timestamp):
         """Simpan data ke file (replace, tidak append) dengan timestamp real-time"""
+        # #region agent log
+        try:
+            f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:600','message':'save_to_file called','data':{'weight':weight,'timestamp':timestamp,'save_count':self.save_count},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
+        except: pass
+        # #endregion
+        
         try:
             # Pastikan directory ada
             if not ensure_data_directory():
                 print("WARNING: Gagal menyimpan data - directory tidak bisa diakses")
-                return
+                return False
             
             # Tulis data ke file
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
                 f.write(f"Waktu: {timestamp}\n")
-                f.write(f"Tanggal: {timestamp.split()[0]}\n")  # Tanggal saja
-                f.write(f"Jam: {timestamp.split()[1]}\n")  # Waktu saja
+                f.write(f"Tanggal: {timestamp.split()[0]}\n")
+                f.write(f"Jam: {timestamp.split()[1]}\n")
                 f.write(f"Berat: {weight:.3f} kg\n")
-                # Tambahkan timestamp dalam format ISO untuk kompatibilitas
                 f.write(f"Timestamp: {timestamp}\n")
+            
+            self.save_count += 1
+            self.last_save_time = time.time()
+            
+            # #region agent log
+            try:
+                f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:623','message':'Data saved successfully','data':{'save_count':self.save_count},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
+            except: pass
+            # #endregion
+            
+            return True
+            
         except PermissionError as e:
             print(f"\nERROR: Permission denied saat menyimpan data ke {DATA_FILE}")
             print(f"   Jalankan: sudo chown $USER:$USER {DATA_DIR}")
             print(f"   Atau: sudo chmod 755 {DATA_DIR}")
+            return False
         except Exception as e:
             print(f"Error menyimpan data: {e}")
+            return False
     
-    def display_weight(self, weight):
-        """Tampilkan berat di console"""
+    def display_weight(self, weight, is_stable=False):
+        """Tampilkan berat di console dengan indikator stabilitas"""
         if weight is not None:
-            # Format tampilan
-            print(f"\rBerat: {weight:8.3f} kg    ", end='', flush=True)
+            status = "STABIL" if is_stable else "      "
+            print(f"\rBerat: {weight:8.3f} kg  [{status}]  ", end='', flush=True)
         else:
-            print(f"\rBerat: ERROR          ", end='', flush=True)
+            print(f"\rBerat: ERROR                    ", end='', flush=True)
     
     def run(self):
-        """Jalankan aplikasi utama"""
-        print("=" * 50)
-        print("Program Timbangan Digital")
+        """Jalankan aplikasi utama dengan deteksi stabilitas"""
+        print("=" * 60)
+        print("Program Timbangan Digital dengan Deteksi Stabilitas")
         print("Tekan Ctrl+C untuk keluar")
-        print("=" * 50)
+        print("=" * 60)
         print()
+        print("ℹ️  Data akan disimpan hanya ketika berat stabil")
+        print("ℹ️  Threshold stabilitas: ±5 gram")
+        print()
+        
+        # #region agent log
+        try:
+            f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:667','message':'App run started','data':{},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
+        except: pass
+        # #endregion
         
         try:
             while self.running:
+                self.read_count += 1
                 weight = self.ads.read_weight()
-                # Ambil waktu real-time dengan presisi milidetik
-                now = datetime.now()
-                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-                timestamp_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # Dengan milidetik
+                
+                # #region agent log
+                if self.read_count % 10 == 0:
+                    try:
+                        f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:680','message':'Weight read (every 10th)','data':{'weight':weight,'read_count':self.read_count,'save_count':self.save_count},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
+                    except: pass
+                # #endregion
                 
                 if weight is not None:
-                    # Tampilkan di console
-                    self.display_weight(weight)
+                    # Cek apakah berat stabil
+                    is_stable = self.stabilizer.add_reading(weight)
                     
-                    # Simpan ke file (replace) dengan timestamp lengkap
-                    self.save_to_file(weight, timestamp_ms)
+                    # Tampilkan di console
+                    self.display_weight(weight, is_stable)
+                    
+                    # Simpan HANYA jika berat stabil dan berbeda dari sebelumnya
+                    if is_stable:
+                        stable_weight = self.stabilizer.get_stable_weight()
+                        if stable_weight is not None:
+                            now = datetime.now()
+                            timestamp_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                            
+                            # Simpan ke file
+                            if self.save_to_file(stable_weight, timestamp_ms):
+                                self.last_saved_weight = stable_weight
+                                # Tampilkan notifikasi singkat
+                                print(f"\n💾 Tersimpan: {stable_weight:.3f} kg pada {timestamp_ms}")
+                                print(f"   Total pembacaan: {self.read_count}, Total simpan: {self.save_count}")
+                                print()
                 
                 time.sleep(0.1)  # Update setiap 100ms
         
         except KeyboardInterrupt:
             print("\n\nProgram dihentikan oleh user")
+            print(f"Statistik:")
+            print(f"  Total pembacaan: {self.read_count}")
+            print(f"  Total penyimpanan: {self.save_count}")
+            if self.read_count > 0:
+                efficiency = (1 - self.save_count / self.read_count) * 100
+                print(f"  Efisiensi: {efficiency:.1f}% (pengurangan operasi file)")
         except Exception as e:
             print(f"\n\nError: {e}")
         finally:
+            # #region agent log
+            try:
+                f=open(DEBUG_LOG_FILE,'a',encoding='utf-8');f.write(json.dumps({'location':'timbangan.py:728','message':'App cleanup','data':{'read_count':self.read_count,'save_count':self.save_count},'timestamp':int(time.time()*1000),'sessionId':'debug-session','hypothesisId':'H1'})+'\n');f.close()
+            except: pass
+            # #endregion
+            
             self.ads.cleanup()
             print("Program selesai")
 
