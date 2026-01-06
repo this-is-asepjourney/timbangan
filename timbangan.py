@@ -111,17 +111,17 @@ else:
 
 
 
-DRDY_PIN = 24  # Data Ready Pin (GPIO 24, Physical Pin 18)
-PDWN_PIN = 10  # Power Down Pin (GPIO 10, Physical Pin 19) - sesuai konfigurasi
-SPEED_PIN = 22  # Speed Pin (GPIO 22, Physical Pin 15) - sesuai konfigurasi
+PDWN_PIN = 10  
+SPEED_PIN = 22  
+SPI_SCLK_PIN = 11  
+SPI_MISO_PIN = 9  
 
 # Konfigurasi SPI
 SPI_BUS = 0      # SPI Bus 0 (default)
 SPI_DEVICE = 0   # SPI Device 0 (default)
 SPI_SPEED = 1000000  # 1 MHz (sesuai dengan ADS1232 spec)
 
-# Konstanta Kalibrasi (sesuaikan dengan load cell Anda)
-# Nilai ini perlu dikalibrasi dengan beban yang diketahui
+
 SCALE_FACTOR = 0.0000015  # Faktor skala untuk konversi ke kg
 OFFSET = 0.0  # Offset untuk zero adjustment
 
@@ -226,13 +226,12 @@ def verify_pin_safety():
     warnings = []
     errors = []
     
-    # Daftar pin yang digunakan
+    # Daftar pin yang digunakan - Sesuai dengan ads1232_handler.py (18 pin, TIDAK ADA DRDY)
     used_pins = {
-        'DRDY': DRDY_PIN,
         'PDWN': PDWN_PIN,
         'SPEED': SPEED_PIN,
-        'SPI_SCLK': 11,  # GPIO 11 untuk SPI SCLK
-        'SPI_MISO': 9,   # GPIO 9 untuk SPI MISO
+        'SPI_SCLK': SPI_SCLK_PIN,  # GPIO 11 untuk SPI SCLK
+        'SPI_MISO': SPI_MISO_PIN,   # GPIO 9 untuk SPI MISO/DOUT (juga untuk data ready)
     }
     
     # Pin-pin yang tidak boleh digunakan (reserved/system pins)
@@ -272,15 +271,18 @@ def verify_pin_safety():
 class ADS1232:
     """Kelas untuk mengontrol ADS1232"""
     
-    def __init__(self, drdy_pin=DRDY_PIN, pdwn_pin=PDWN_PIN, speed_pin=SPEED_PIN, force_calibration=False):
-        self.drdy_pin = drdy_pin
+    def __init__(self, pdwn_pin=PDWN_PIN, speed_pin=SPEED_PIN, force_calibration=False):
+        # CATATAN: ADS1232 18 pin TIDAK memiliki pin DRDY terpisah
+        #          Data ready dideteksi melalui DOUT (SPI_MISO_PIN)
         self.pdwn_pin = pdwn_pin
         self.speed_pin = speed_pin
+        self.dout_pin = SPI_MISO_PIN  # DOUT digunakan untuk data ready detection
         
         # Setup GPIO
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarn(False)
-        GPIO.setup(self.drdy_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        # Setup DOUT sebagai input untuk data ready detection
+        GPIO.setup(self.dout_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
         if self.pdwn_pin:
             GPIO.setup(self.pdwn_pin, GPIO.OUT)
@@ -323,19 +325,23 @@ class ADS1232:
                 self.save_calibration()
     
     def is_ready(self):
-        """Cek apakah data siap dibaca"""
-        return GPIO.input(self.drdy_pin) == GPIO.LOW
+        """
+        Cek apakah data siap dibaca
+        Untuk ADS1232 18 pin: DOUT LOW = data ready (tidak ada pin DRDY terpisah)
+        """
+        return GPIO.input(self.dout_pin) == GPIO.LOW
     
     def read_raw(self):
-        """Baca data mentah dari ADS1232"""
-        # Tunggu sampai data ready
-        timeout = 0
-        while not self.is_ready() and timeout < 100:
+        """
+        Baca data mentah dari ADS1232
+        Untuk ADS1232 18 pin: DOUT digunakan untuk mendeteksi data ready
+        """
+        # Tunggu sampai DOUT LOW (data ready) - sesuai ads1232_handler.py
+        timeout = time.time() + 1.0  # Timeout 1 detik
+        while GPIO.input(self.dout_pin) == GPIO.HIGH:
+            if time.time() > timeout:
+                return None
             time.sleep(0.001)
-            timeout += 1
-        
-        if timeout >= 100:
-            return None
         
         # Baca 3 byte data (24-bit)
         data = self.spi.readbytes(3)

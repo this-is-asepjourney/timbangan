@@ -1,8 +1,8 @@
 {
-  "tare_value": 2002918.0,
+  "tare_value": 2003383.1,
   "scale_factor": 1.5e-06,
-  "calibrated_date": "2026-01-06 08:00:27.517",
-  "calibrated_date_iso": "2026-01-06T08:00:27.517228",
+  "calibrated_date": "2026-01-06 09:37:24.544",
+  "calibrated_date_iso": "2026-01-06T09:37:24.544224",
   "load_cell_type": "BENZ WERKZ BZ6150",
   "max_capacity_kg": 50,
   "calibration_method": "auto",
